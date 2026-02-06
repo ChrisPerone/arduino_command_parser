@@ -36,15 +36,13 @@ ValveState valves[10];
 
 const byte valvePins[10] = {2,3,4,5,6,7,8,9,10,11};
 const byte pwmPins[] = {3,5,6,9,10,11};
+const byte pinCount = ARRAY_SIZE(valvePins);
 const byte pwmPinCount = ARRAY_SIZE(pwmPins);
 const int pumpPin = 12;
 const int minZone = 1;
 const int maxZone = 10;
 const int maxSafePSI = 30;
-const int ACTION_NONE = 0;
-const int ACTION_ON = 1;
-const int ACTION_OFF = 2;
-const int ACTION_DELAY = 3;
+enum class ActionType { NONE, ON, OFF, DELAY, SHUTDOWN };
 
 // ------------------------------------------------------------
 //  SETUP
@@ -77,15 +75,68 @@ int getFreeRam() {
 // ------------------------------------------------------------
 
 void loop() {
+  static unsigned long nextActionTime = 0;
+  unsigned long currentTime = millis();
+
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');
+    line.trim();
     processCmd(line);
+  } else if (currentTime >= nextActionTime) {
+    // Generate the mock command
+    // sendMockCommand();
+
+    // Schedule the next random interval
+    nextActionTime = currentTime + random(100, 1000); 
   }
 
+  // Wire.requestFrom(8, 4); // Ask Mega for status
+  //   while (Wire.available()) {
+  //     char c = Wire.read();
+  //     if (c == 'B') { // 'B' for Beat
+  //       // I now know your heart just beat in the real world!
+  //       updateAIChat("User Heartbeat Detected"); 
+  //     }
+  // }
+
+// --- NEW: SENSORY FEEDBACK STREAM ---
+  static unsigned long lastDataTime = 0;
+  if (millis() - lastDataTime > 100) { // Send data every 100ms
+    // int p1 = analogRead(A1); // Chest
+    // int p2 = analogRead(A2); // Thigh
+    // int p3 = analogRead(A3); // Hand/Touch
+    // int p4 = analogRead(A4); // Vacuum/PSI
+
+    // Standardized format for our mitmproxy bridge
+    // Serial.print("DATA: P1:"); Serial.println(p1);
+    // Serial.print(" P2:"); Serial.print(p2);
+    // Serial.print(" P3:"); Serial.print(p3);
+    // Serial.print(" P4:"); Serial.println(p4);
+
+    lastDataTime = millis();
+  }
   updateValves();
   updateAnimation();
   // Serial.print("Free RAM: ");
   // Serial.println(getFreeRam());  
+}
+
+void sendMockCommand() {
+  char cmdBuffer[40]; // Buffer to hold the command string
+
+  // 2. Generate the random values
+  int pin      = random(1, 7);    // 1 through 6
+  int duration = random(500, 5001); // 500 through 5000
+  int intensity = 255; //random(120, 256); // 120 through 255
+  int count    = random(1, 11);   // 1 through 10
+
+  // 3. Format the string: "ON <pin> <duration> <intensity> <count>"
+  sprintf(cmdBuffer, "ON %d %d %d %d", pin, duration, intensity, count);
+
+  // 4. Pass it to your existing function
+  Serial.print("Mocking: ");
+  Serial.println(cmdBuffer);
+  processCmd(cmdBuffer);
 }
 
 // ------------------------------------------------------------
@@ -148,6 +199,11 @@ void showEmoticon(int emoticon, bool on) {
   }
 
   switch (emoticon) {
+    case 15:
+      // frameDelay = 60000/(BPM*frameCount)    
+      startAnimation(emoteHeartbeatFrames, emoteHeartbeatFrameCount, 100, 3);
+      break;
+
     case 10:
       startAnimation(emote2Frames, emote2FrameCount, 100, 3);
       break;
@@ -207,7 +263,7 @@ void updateValves() {
   unsigned long now = millis();
   bool anyOpen = false;
 
-  for (int i = 0; i < 10; i++) {
+  for (int i = 0; i < pinCount; i++) {
     if (valves[i].active) {
       anyOpen = true;
 
@@ -228,29 +284,32 @@ void updateValves() {
 
 // ------------------------------------------------------------
 //  COMMAND PARSER
-//  Command format: "ON 1 5000 10" or "OFF 1 0 0"
+//  Command format: action pin delayMS pwm(intensity) emoji
+//  pwm param only valid for pwm pins, otherwise skips
+//  e.g. "ON 2 5000 120 10" set pin 2 to high for 5 seconds at pwm 120 and show emoji 10
+//  e.g. "OFF 1 3000 10" set pin 1 to low for 3 seconds and show emoji 10
+//  e.g. "DELAY 1000 8" delay everything for 1 second and show emoji 8
 // ------------------------------------------------------------
 
-void processCmd(String &cmd) {
-  cmd.trim();
-
-  char act[6] = "";
+void processCmd(const String &cmd) {
+  char act[12] = "";
   int zone = 0, t = 0, intensity = 0, emote = 0;
   byte pwmValue = 0;
   int pin = 0;
 
-  int n = sscanf(cmd.c_str(), "%5s %d %d %d %d", act, &zone, &t, &intensity, &emote);
+  int n = sscanf(cmd.c_str(), "%11s %d %d %d %d", act, &zone, &t, &intensity, &emote);
   // Convert the string action into a number ID
-  int actionID = ACTION_NONE; 
-  if (strcmp(act, "ON") == 0)      actionID = ACTION_ON;
-  else if (strcmp(act, "OFF") == 0)     actionID = ACTION_OFF;
-  else if (strcmp(act, "DELAY") == 0)   actionID = ACTION_DELAY;
+  ActionType action = ActionType::NONE;
+  if (strcasecmp(act, "ON") == 0)             action = ActionType::ON;
+  else if (strcasecmp(act, "OFF") == 0 ||
+           strcasecmp(act, "DUMP") == 0)      action = ActionType::OFF;
+  else if (strcasecmp(act, "DELAY") == 0)     action = ActionType::DELAY;
+  else if (strcasecmp(act, "SHUTDOWN") == 0)  action = ActionType::SHUTDOWN;
 
-  Serial.println("action:" + String(act) + " zone:" + String(zone) + " time:" + String(t) + " intensity:" + String(intensity) + " emote:" + String(emote) + " numArgs:" + String(n));
-  Serial.println("actionID:" + String(actionID));
+  Serial.println("action:" + String(int(action)) + " zone:" + String(zone) + " time:" + String(t) + " intensity:" + String(intensity) + " emote:" + String(emote) + " numArgs:" + String(n));
 
-  switch (actionID) {
-    case ACTION_ON:
+  switch (action) {
+    case ActionType::ON:
       //Validation
       if (n != 5 || zone < minZone || zone > maxZone) {
         Serial.println("Invalid command");
@@ -260,9 +319,9 @@ void processCmd(String &cmd) {
       pwmValue = constrain(intensity, 0, 255);
       inflateZone(zone, t, pwmValue, emote);
       break;
-    case ACTION_OFF:
+    case ActionType::OFF:
       //Validation
-      if (n != 5 || zone < minZone || zone > maxZone) {
+      if (n != 4 || zone < minZone || zone > maxZone) {
         Serial.println("Invalid command");
         return;
       }
@@ -271,9 +330,9 @@ void processCmd(String &cmd) {
       valves[zone - 1].active = false;
       showEmoticon(emote, false);
       break;
-    case ACTION_DELAY:
+    case ActionType::DELAY:
       //Validation
-      if (n < 2 || n > 3) {
+      if (n != 3) {
         Serial.println("Invalid command");
         return;
       }
@@ -281,61 +340,22 @@ void processCmd(String &cmd) {
       delay(zone);
       showEmoticon(t, false);
       break;
+    case ActionType::SHUTDOWN:
+      Serial.println("SHUTDOWN");
+      for (int i = 0; i < pinCount; ++i) {
+        if (valves[i].active) {
+          valves[i].active = false;
+          if (valves[i].isPwm) {
+            analogWrite(valvePins[i], 0);
+          } else {
+            digitalWrite(valvePins[i], LOW);
+          }
+        }
+      }
+      delay(30000);
+      break;
     default:
       Serial.println("Invalid action");
       return;
   }
-  // if (actionID == 3 && (n < 2 || n > 3)) {
-  //   Serial.println("Invalid command");
-  //   return;
-  // } else if ((actionID == 1 || actionID == 2) && (n != 5 || zone < minZone || zone > maxZone)) {
-  //   Serial.println("Invalid command");
-  //   return;
-  // } else if (actionID == 0) {
-  //   Serial.println("Invalid action");
-  //   return;
-  // }
-
-  // int pin = valvePins[zone - 1];
-
-  // if (actionID == 3) {
-  //   Serial.println("DELAY " + String(zone) + "ms emote " + String(t));
-  //   delay(zone);
-  //   showEmoticon(t, false);
-  //   return;
-  // }
-
-  // if (actionID == 1) {
-  //   digitalWrite(pumpPin, HIGH);
-  //   byte pwmValue = constrain(intensity, 0, 255);
-  //   inflateZone(zone, t, pwmValue, emote);
-
-  //   Serial.print("ON zone ");
-  //   Serial.print(zone);
-  //   Serial.print(" for ");
-  //   Serial.print(t);
-  //   Serial.print("ms intensity ");
-  //   Serial.print(pwmValue);
-  //   Serial.print(" emote ");
-  //   Serial.println(emote);
-  // } else {
-  //   digitalWrite(pin, LOW);
-  //   valves[zone - 1].active = false;
-  //   showEmoticon(emote, false);
-
-  //   Serial.print("OFF zone ");
-  //   Serial.print(zone);
-  //   Serial.print(" emote ");
-  //   Serial.println(emote);
-  // }
-
-  bool anyOpen = false;
-  for (int i = 0; i < 10; i++) {
-    if (valves[i].active) {
-      anyOpen = true;
-      break;
-    }
-  }
-
-  digitalWrite(pumpPin, anyOpen);
 }
